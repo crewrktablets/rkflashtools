@@ -68,6 +68,10 @@ int _CRT_fmode = _O_BINARY;
 #define RKFT_DISPLAY        0x100
 #endif
 
+/* TODO: Parameters flash area starts with PARM and is
+ * available 8 times in a row at flash sector 0.
+ */
+
 typedef struct {
 	char *name;			/**< Name of partition */
 	int  start;			/**< Start address */
@@ -100,15 +104,20 @@ const t_pid pidtab[] = {
 };
 
 typedef enum {
-	RKFCMD_FLASH_READ	= 0x000a1400,
-	RKFCMD_FLASH_WRITE	= 0x000a1500,
+	RKFCMD_BLD_HELLO	= 0x00060000,		/* Request hello from bootloader */
+											/* USBS reply is 0x06 */
+	RKFCMD_BLD_DATA		= 0x00061b00,		/* ?? Get Bootloader or Flash information */
+											/* returns string B01321020311001V */
+
+	RKFCMD_FLASH_READ	= 0x000a1400,		/* Read from FLASH, USBS is 0x00 */
+	RKFCMD_FLASH_WRITE	= 0x000a1500,		/* Write to FLASH, USBS is 0x00 */
 
 	RKFCMD_DRAM_READ	= 0x000a1700,
 	//RKFCMD_DRAM_WRITE
 
-	RKFCMD_IDB_READ		= 0x000a0400,
-	//RKFCMD_IDB_WRITE	= 0x000a0500,
-	//RKFCMD_IDB_ERASE	= 0x000a0600,
+	RKFCMD_IDB_READ		= 0x000a0400,		/* Read IDB from FLASH */
+	RKFCMD_IDB_WRITE	= 0x000a0500,		/* Write IDB to FLASH */
+	RKFCMD_IDB_ERASE	= 0x000a0600,		/* ?? Erase IDB Sector */
 
 	RKFCMD_REBOOT		= 0x0006ff00,
 } eSocCmd;

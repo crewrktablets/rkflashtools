@@ -43,7 +43,7 @@
 int _CRT_fmode = _O_BINARY;
 #endif
 
-#define RKFLASHTOOL_VERSION_MAJOR      5
+#define RKFLASHTOOL_VERSION_MAJOR      6
 #define RKFLASHTOOL_VERSION_MINOR      1
 
 /** USB Descriptor Definition
@@ -109,6 +109,8 @@ typedef enum {
 	RKFCMD_BLD_DATA		= 0x00061b00,		/* ?? Get Bootloader or Flash information */
 											/* returns string B01321020311001V */
 
+	RKFCMD_REBOOT		= 0x0006ff00,		/* Reboot */
+
 	RKFCMD_FLASH_READ	= 0x000a1400,		/* Read from FLASH, USBS is 0x00 */
 	RKFCMD_FLASH_WRITE	= 0x000a1500,		/* Write to FLASH, USBS is 0x00 */
 
@@ -119,10 +121,20 @@ typedef enum {
 	RKFCMD_IDB_WRITE	= 0x000a0500,		/* Write IDB to FLASH */
 	RKFCMD_IDB_ERASE	= 0x000a0600,		/* ?? Erase IDB Sector */
 
-	RKFCMD_REBOOT		= 0x0006ff00,
 } eSocCmd;
 
 /** RK USB Handling
+ *
+ */
+
+/* RK USB Endpoints
+ *
+ * Interface uses two endpoints
+ */
+#define EP_CMD			2		/* Endpoint for bootloader control */
+#define EP_DATA 		1		/* Endpoint for bootloader data in / out */
+
+/* Bootloader control message
  *
  */
 #define RKFT_CID            4
@@ -185,10 +197,11 @@ static void send_cmd(libusb_device_handle *h, int e, uint8_t flag,
                      uint32_t command, uint32_t offset, uint8_t size) {
     cmd[RKFT_CID ] = cid++;
     cmd[RKFT_FLAG] = flag;
-    cmd[RKFT_SIZE] = size;
 
     SETBE32(&cmd[RKFT_COMMAND], command);
     SETBE32(&cmd[RKFT_OFFSET ], offset );
+    SETBE32(&cmd[RKFT_SIZE], size);
+	//cmd[RKFT_SIZE] = size;
 
     libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, cmd, sizeof(cmd), &tmp, 0);
 }
@@ -201,6 +214,90 @@ static void send_cmd(libusb_device_handle *h, int e, uint8_t flag,
 
 #define recv_buf(h,e,s) libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_IN, \
                                              buf, s, &tmp, 0)
+
+// TODO: How to put blocksizes? May be as fixed size>>9 ??
+static int usb_tranceive( libusb_device_handle *h, eSocCmd command, uint32_t offset, void *buf, uint32_t size)
+{
+	int ret = -1;
+	int flag = 0x00;
+	uint8_t *rxbuf = NULL;
+	uint8_t *txbuf = NULL;
+	uint32_t rxsz = 0;
+	uint32_t txsz = 0;
+
+    switch (command) {
+    /* Commands without buffer use */
+    case RKFCMD_BLD_HELLO:
+    case RKFCMD_REBOOT:
+    	break;
+    /* Commands receiving data from bootloader */
+    case RKFCMD_BLD_DATA:
+    case RKFCMD_FLASH_READ:
+    case RKFCMD_DRAM_READ:
+    case RKFCMD_IDB_READ:
+    	if((buf == NULL) || (size == 0)) {
+    		info( "%s(): Invalid buffer on READ command 0x%08x\n", __func__, command);
+    		goto error_out;
+    	}
+    	rxbuf = (uint8_t*)buf;
+    	rxsz = size;
+    	break;
+
+        /* Commands writing to bootloader */
+    case RKFCMD_FLASH_WRITE:
+    case RKFCMD_IDB_WRITE:
+    	flag = 0x80;
+    //case RKFCMD_DRAM_WRITE:
+    	if((buf == NULL) || (size == 0)) {
+    		info( "%s(): Invalid buffer on WRITE command 0x%08x\n", __func__, command);
+    		goto error_out;
+    	}
+    	txbuf = (uint8_t*)buf;
+    	txsz = size;
+    	break;
+    case RKFCMD_IDB_ERASE:
+    	break;
+    }
+
+	/* setup command */
+	cmd[RKFT_CID ] = cid++;
+    cmd[RKFT_FLAG] = flag;
+
+    SETBE32(&cmd[RKFT_COMMAND], command);
+    SETBE32(&cmd[RKFT_OFFSET ], offset );
+    SETBE32(&cmd[RKFT_SIZE], size);
+
+    /* Send Command out */
+    ret = libusb_bulk_transfer(h, EP_CMD|LIBUSB_ENDPOINT_OUT, cmd, sizeof(cmd), &tmp, 0);
+    if (ret) {
+    	info( "%s():%d Error Code %d received\n", __func__, __LINE__, ret);
+    }
+
+    /* Optional send or receive some data */
+    if (txsz && txbuf) {
+    	/* We have something to send to the bootloader */
+    	ret = libusb_bulk_transfer( h, EP_DATA|LIBUSB_ENDPOINT_OUT , txbuf, txsz, &tmp, 0);
+        if (ret) {
+        	info( "%s():%d Error Code %d received\n", __func__, __LINE__, ret);
+        }
+    }
+    else if (rxsz && rxbuf) {
+    	/* We have something to receive from the bootloader */
+    	ret = libusb_bulk_transfer( h, EP_DATA|LIBUSB_ENDPOINT_IN , rxbuf, rxsz, &tmp, 0);
+        if (ret) {
+        	info( "%s():%d Error Code %d received\n", __func__, __LINE__, ret);
+        }
+    }
+
+    /* Request wait and receive status response from bootloader */
+    ret = libusb_bulk_transfer( h, EP_DATA|LIBUSB_ENDPOINT_IN , rxbuf, rxsz, &tmp, 0);
+    if (ret) {
+    	info( "%s():%d Error Code %d received\n", __func__, __LINE__, ret);
+    }
+
+error_out:
+    return ret;
+}
 
 /*************************************************************************
  *
@@ -218,10 +315,12 @@ int soc_flash_read( libusb_device_handle *h, int offset, int size)
     while (size > 0)
     {
         info("reading flash memory at offset 0x%08x", offset);
-
+/*
         send_cmd(h, 2, 0x80, RKFCMD_FLASH_READ, offset, RKFT_OFF_INCR);
         recv_buf(h, 1, RKFT_BLOCKSIZE);
         recv_res(h, 1);
+*/
+        usb_tranceive( h, RKFCMD_FLASH_READ, offset, RKFT_BLOCKSIZE)
 
         /* Bootloader result is returned in tmp buffer */
         info ( " = 0x%x\n", tmp);
@@ -508,7 +607,7 @@ int soc_bootloader( libusb_device_handle *h)
 {
 	int ret = 0;
 
-    send_cmd(h, 2, 0x80, 0x00060000, 0x00000000, 0x00);
+    send_cmd(h, 2, 0x80, RKFCMD_BLD_HELLO, 0x00000000, 0x00);
     recv_res(h, 1);
     usleep(20*1000);
 
@@ -522,7 +621,7 @@ int soc_reboot( libusb_device_handle *h)
 	int ret = 0;
 
 	info("rebooting device...\n");
-	send_cmd(h, 2, 0x00, 0x0006ff00, 0x00000000, 0x00);
+	send_cmd(h, 2, 0x00, RKFCMD_REBOOT, 0x00000000, 0x00);
 	recv_res(h, 1);
 
 	//TODO: evaluate tmp[0] response

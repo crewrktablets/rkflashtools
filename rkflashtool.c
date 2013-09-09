@@ -104,6 +104,7 @@ const t_pid pidtab[] = {
 };
 
 typedef enum {
+	RKFCMD_BLD_INIT		= 0x000600FD,		/* Found on RK2918 only */
 	RKFCMD_BLD_HELLO	= 0x00060000,		/* Request hello from bootloader */
 											/* USBS reply is 0x06 */
 	RKFCMD_BLD_DATA		= 0x00061b00,		/* ?? Get Bootloader or Flash information */
@@ -143,16 +144,39 @@ typedef enum {
 #define RKFT_OFFSET         17
 #define RKFT_SIZE           23
 
-#define SETBE32(a, v) ((uint8_t*)a)[3] =  v      & 0xff; \
-                      ((uint8_t*)a)[2] = (v>>8 ) & 0xff; \
-                      ((uint8_t*)a)[1] = (v>>16) & 0xff; \
-                      ((uint8_t*)a)[0] = (v>>24) & 0xff
+/*
+.----------------------------------------USBC: Command (out) or USBS Result (in)
+|           .----------------------------CID:  Command ID, USBS retuns with same ID
+|           |               .------------FLAG: Normally it just should toggle...
+|           |               |          .-CMD:  Command for bootloader action
+|           |               |          |       .--ADDRESS   SIZE--.
+|           |               |          |       |                  |
+.--. .---------.             .. .---------. .---------.       .---------.
+0  3|4         8|           |12|13       16|17       20|     |23       26|
+USBC CF 31 90 00 00 00 00 00 80 00 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+*/
+typedef struct __attribute__((__packed__)) {
+	uint32_t	token;		/**< Token is USBC 0x55534243 */
+	uint32_t	cmdid;		/**< Command ID (sort of random number) */
+	uint32_t	dummy1;		/**< Not used so far */
+	uint8_t 	Flag;		/**< Sometimes set to 0x80, sometimes not */
+	eSocCmd		cmd;		/**< The command */
+	uint32_t	addr;		/**< address of data belonging to this command */
+	uint16_t 	dummy2;		/**< Not used so far */
+	uint32_t	size;		/**< size of data belonging to this command */
+	uint32_t	dummy3;		/**< Not used so far */
+} t_blcmd;
 
+#define SETBE32(a, v) a  = ((v>> 0) & 0xff) << 24; \
+                      a |= ((v>> 8) & 0xff) << 16; \
+                      a |= ((v>>16) & 0xff) <<  8; \
+                      a |= ((v>>24) & 0xff) <<  0
 
 static uint8_t cmd[31] = { 'U', 'S', 'B', 'C', };
 static uint8_t res[13];
 
-static uint8_t buf[RKFT_BLOCKSIZE], cid;
+static uint8_t buf[RKFT_BLOCKSIZE];
+static uint32_t cid = 0xCF319000;
 static int tmp;
 
 static const char *const strings[3] = { "info", "fatal", "" };
@@ -190,20 +214,35 @@ static void usage(void) {
     		"  i <offset> <blocks> > file read IDB flash\n"
             "  p [>file]                  fetch [or save] parameters\n"
             "  b                          reboot device\n"
+			"  ?                          read SOC/NAND info\n"
           "\n");
 }
 
 static void send_cmd(libusb_device_handle *h, int e, uint8_t flag,
-                     uint32_t command, uint32_t offset, uint8_t size) {
-    cmd[RKFT_CID ] = cid++;
+                     uint32_t command, uint32_t offset, uint8_t size)
+{
+	t_blcmd *usbcmd = malloc(sizeof(t_blcmd));
+	if (usbcmd == NULL)
+		fatal("Error no memory for cmd!");
+	info("CMD is of size %d\n", sizeof(t_blcmd));
+	memset( usbcmd, 0, sizeof(t_blcmd));
+	usbcmd->token = 0x43425355;	/* USBC */
+	SETBE32(usbcmd->cmdid, cid++);
+	usbcmd->Flag = flag;
+	SETBE32(usbcmd->cmd, command);
+	SETBE32(usbcmd->addr, offset);
+	SETBE32(usbcmd->size, size);
+#if 0
+	SETBE32(cmd[RKFT_CID ] = cid++;
     cmd[RKFT_FLAG] = flag;
 
     SETBE32(&cmd[RKFT_COMMAND], command);
     SETBE32(&cmd[RKFT_OFFSET ], offset );
     SETBE32(&cmd[RKFT_SIZE], size);
 	//cmd[RKFT_SIZE] = size;
-
-    libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, cmd, sizeof(cmd), &tmp, 0);
+#endif
+    libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, (uint8_t*)usbcmd, sizeof(t_blcmd), &tmp, 0);
+    free(usbcmd);
 }
 
 #define send_buf(h,e,s) libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, \
@@ -215,6 +254,7 @@ static void send_cmd(libusb_device_handle *h, int e, uint8_t flag,
 #define recv_buf(h,e,s) libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_IN, \
                                              buf, s, &tmp, 0)
 
+#if PHASE_2
 // TODO: How to put blocksizes? May be as fixed size>>9 ??
 static int usb_tranceive( libusb_device_handle *h, eSocCmd command, uint32_t offset, void *buf, uint32_t size)
 {
@@ -233,6 +273,7 @@ static int usb_tranceive( libusb_device_handle *h, eSocCmd command, uint32_t off
     /* Commands receiving data from bootloader */
     case RKFCMD_BLD_DATA:
     case RKFCMD_FLASH_READ:
+
     case RKFCMD_DRAM_READ:
     case RKFCMD_IDB_READ:
     	if((buf == NULL) || (size == 0)) {
@@ -298,6 +339,7 @@ static int usb_tranceive( libusb_device_handle *h, eSocCmd command, uint32_t off
 error_out:
     return ret;
 }
+#endif
 
 /*************************************************************************
  *
@@ -315,12 +357,13 @@ int soc_flash_read( libusb_device_handle *h, int offset, int size)
     while (size > 0)
     {
         info("reading flash memory at offset 0x%08x", offset);
-/*
-        send_cmd(h, 2, 0x80, RKFCMD_FLASH_READ, offset, RKFT_OFF_INCR);
+#if PHASE_2
+        usb_tranceive( h, RKFCMD_FLASH_READ, offset, RKFT_BLOCKSIZE)
+#else
+        send_cmd(h, 2, 0x00, RKFCMD_FLASH_READ, offset, RKFT_OFF_INCR);
         recv_buf(h, 1, RKFT_BLOCKSIZE);
         recv_res(h, 1);
-*/
-        usb_tranceive( h, RKFCMD_FLASH_READ, offset, RKFT_BLOCKSIZE)
+#endif
 
         /* Bootloader result is returned in tmp buffer */
         info ( " = 0x%x\n", tmp);
@@ -417,7 +460,7 @@ int soc_parameters_get( libusb_device_handle *h, uint8_t *buf, int *size)
 	*size = 0;
 	info("reading parameters from SOC");
 
-	send_cmd(h, 2, 0x80, RKFCMD_FLASH_READ, 0, RKFT_OFF_INCR);
+	send_cmd(h, 2, 0x00, RKFCMD_FLASH_READ, 0, RKFT_OFF_INCR);
 	recv_buf(h, 1, RKFT_BLOCKSIZE);
 	recv_res(h, 1);
     /* Bootloader result is returned in tmp buffer */
@@ -554,7 +597,7 @@ int soc_autopart( libusb_device_handle *h, char *name, int *offset, int *size)
 
 /** Save PARAMETERS to Output
  *
- * Write parameters to given defauklt output.
+ * Write parameters to given default output.
  */
 int soc_parameters_save( uint8_t *buf, int size)
 {
@@ -579,7 +622,7 @@ int soc_dram_read( libusb_device_handle *h, int offset, int size)
         int sizeRead = size > RKFT_MEM_INCR ? RKFT_MEM_INCR : size;
         info("reading memory at offset 0x%08x size %x", offset, sizeRead);
 
-        send_cmd(h, 2, 0x80, 0x000a1700, offset-0x60000000, sizeRead);
+        send_cmd(h, 2, 0x00, 0x000a1700, offset-0x60000000, sizeRead);
         recv_buf(h, 1, sizeRead);
         recv_res(h, 1);
         /* Bootloader result is returned in tmp buffer */
@@ -606,13 +649,54 @@ int soc_dram_read( libusb_device_handle *h, int offset, int size)
 int soc_bootloader( libusb_device_handle *h)
 {
 	int ret = 0;
+	uint8_t ver[40];
+	int i, n = 0;
 
-    send_cmd(h, 2, 0x80, RKFCMD_BLD_HELLO, 0x00000000, 0x00);
-    recv_res(h, 1);
-    usleep(20*1000);
+	info("Detecting Hardware...\n");
 
-    //TODO: evaluate tmp[0] response
-    //TODO: retrieve bootloader version information
+	cid = 0xCF319000;
+	send_cmd(h, EP_CMD, 0x80, RKFCMD_BLD_INIT, 0x00000000, 0x00);
+	if (ret)
+		return ret;
+	ret = recv_res(h, EP_DATA);
+	if (ret)
+		return ret;
+	fprintf(stderr, "  0x%08x: Init returned 0x%02x\n", RKFCMD_BLD_INIT, res[sizeof(res)-1]);
+
+	if (res[sizeof(res)-1] == 0) {
+		/* Try secondary info request for newer devices */
+		cid = 0xCF319000;
+		send_cmd(h, EP_CMD, 0x80, RKFCMD_BLD_DATA, 0x00000000, 0x00);
+		recv_buf(h, EP_DATA, 16);
+		recv_res(h, EP_DATA);
+		info("Init returnd 0x%02x\n", res[sizeof(res)-1]);
+		if (buf[0] == 'B') {
+			buf[16] = 0;
+			fprintf(stderr, "0x%08x: Got Tokens: %s\n", RKFCMD_BLD_DATA, (char*)buf);
+		}
+	}
+	else {
+		memset( ver, 0, sizeof(ver));
+		i = 0;
+		do {
+			send_cmd(h, EP_CMD, 0x80, RKFCMD_BLD_HELLO, 0x00000000, 0x00);
+			recv_res(h, EP_DATA);
+			if (res[sizeof(res)-1] == 1) {
+				n=res[sizeof(res)-3];
+				ver[n]=res[sizeof(res)-2];
+			}
+			i++;
+		} while ((res[sizeof(res)-1]==1) && (i<16));
+
+		/* Print this as debug until we can decode it. */
+		if (n) {
+			int i;
+			fprintf(stderr, "0x%08x: Got Tokens: ", RKFCMD_BLD_HELLO);
+			for (i=0; i<=n; i++)
+				fprintf(stderr, "%02x", ver[i]);
+			fprintf(stderr, "\n");
+		}
+	}
     return ret;
 }
 

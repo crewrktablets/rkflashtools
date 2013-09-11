@@ -103,26 +103,41 @@ const t_pid pidtab[] = {
     { 0, "" },
 };
 
+#define CFLAG_WR	0x00000000
+#define CFLAG_RD	0x80000000
+
+/** The Command Enum
+ *
+ * The following enum contains all reverse engineered commands.
+ * Commands with ?? in the description are unknown in their functionality.
+ *
+ */
 typedef enum {
-	RKFCMD_BLD_INIT		= 0x000600FD,		/* Found on RK2918 only */
-	RKFCMD_BLD_HELLO	= 0x00060000,		/* Request hello from bootloader */
-											/* USBS reply is 0x06 */
-	RKFCMD_BLD_DATA		= 0x00061b00,		/* ?? Get Bootloader or Flash information */
-											/* returns string B01321020311001V */
+	RKFCMD_BLD_INIT		= 0x000600FD | CFLAG_RD,	/* Found on RK2918 only */
+	RKFCMD_BLD_HELLO	= 0x00060000 | CFLAG_RD,	/* Request hello from bootloader */
+													/* USBS reply is 0x06 */
+	RKFCMD_REQ_NAND		= 0x00061a00 | CFLAG_RD,	/* ??Request NAND info */
+													/*   returns 512 bytes of data */
+	RKFCMD_BLD_DATA		= 0x00061b00 | CFLAG_RD,	/* ?? Get Bootloader or Flash information */
+													/* returns string B01321020311001V */
 
-	RKFCMD_REBOOT		= 0x0006ff00,		/* Reboot */
+	RKFCMD_REBOOT		= 0x0006ff00 | CFLAG_RD,	/* Reboot */
 
-	RKFCMD_FLASH_READ	= 0x000a1400,		/* Read from FLASH, USBS is 0x00 */
-	RKFCMD_FLASH_WRITE	= 0x000a1500,		/* Write to FLASH, USBS is 0x00 */
+	RKFCMD_FLASH_READ	= 0x000a1400 | CFLAG_RD,	/* Read from FLASH, USBS is 0x00 */
+	RKFCMD_FLASH_WRITE	= 0x000a1500 | CFLAG_WR,	/* Write to FLASH, USBS is 0x00 */
 
-	RKFCMD_DRAM_READ	= 0x000a1700,
-	//RKFCMD_DRAM_WRITE
+	RKFCMD_DRAM_READ	= 0x000a1700 | CFLAG_RD,	/* Read block of data from DRAM */
+	//RKFCMD_DRAM_WRITE	= 0x000???00 | CFLAG_WR,	/* ?? Write block of data to DRAM */
+	//RKFCDM_DRAM_GO	= 0x00000000 | CFLAG_RD,	/* ?? jump to address and execute */
 
-	RKFCMD_IDB_READ		= 0x000a0400,		/* Read IDB from FLASH */
-	RKFCMD_IDB_WRITE	= 0x000a0500,		/* Write IDB to FLASH */
-	RKFCMD_IDB_ERASE	= 0x000a0600,		/* ?? Erase IDB Sector */
+	RKFCMD_REQ_UNKNOWN	= 0x000a0300 | CFLAG_RD,	/* ?? Read 64 bytes of something 0x00 */
 
-} eSocCmd;
+	RKFCMD_IDB_READ		= 0x000a0400 | CFLAG_RD,	/* Read 2112 bytes sectors from FLASH */
+	RKFCMD_IDB_WRITE	= 0x000a0500 | CFLAG_WR,	/* Write IDB to FLASH */
+	RKFCMD_IDB_ERASE	= 0x000a0600 | CFLAG_RD,	/* ?? Erase IDB Sector */
+
+} eBldCmd;
+
 
 /** RK USB Handling
  *
@@ -160,10 +175,10 @@ typedef struct __attribute__((__packed__)) {
 	uint32_t	cmdid;		/**< Command ID (sort of random number) */
 	uint32_t	dummy1;		/**< Not used so far */
 	uint8_t 	Flag;		/**< Sometimes set to 0x80, sometimes not */
-	eSocCmd		cmd;		/**< The command */
+	eBldCmd		cmd;		/**< The command */
 	uint32_t	addr;		/**< address of data belonging to this command */
-	uint16_t 	dummy2;		/**< Not used so far */
 	uint32_t	size;		/**< size of data belonging to this command */
+	uint16_t 	dummy2;		/**< Not used so far */
 	uint32_t	dummy3;		/**< Not used so far */
 } t_blcmd;
 
@@ -218,31 +233,26 @@ static void usage(void) {
           "\n");
 }
 
-static void send_cmd(libusb_device_handle *h, int e, uint8_t flag,
-                     uint32_t command, uint32_t offset, uint8_t size)
+static int send_cmd(libusb_device_handle *h, int e, uint32_t command, uint32_t offset, uint8_t size)
 {
+	int ret = -1;
 	t_blcmd *usbcmd = malloc(sizeof(t_blcmd));
-	if (usbcmd == NULL)
+	if (usbcmd == NULL) {
 		fatal("Error no memory for cmd!");
-	info("CMD is of size %d\n", sizeof(t_blcmd));
+		return ret;
+	}
 	memset( usbcmd, 0, sizeof(t_blcmd));
 	usbcmd->token = 0x43425355;	/* USBC */
 	SETBE32(usbcmd->cmdid, cid++);
-	usbcmd->Flag = flag;
-	SETBE32(usbcmd->cmd, command);
+	usbcmd->Flag = (uint8_t)(command >> 24);
+	SETBE32(usbcmd->cmd, (command & 0x00ffffff));
 	SETBE32(usbcmd->addr, offset);
 	SETBE32(usbcmd->size, size);
-#if 0
-	SETBE32(cmd[RKFT_CID ] = cid++;
-    cmd[RKFT_FLAG] = flag;
 
-    SETBE32(&cmd[RKFT_COMMAND], command);
-    SETBE32(&cmd[RKFT_OFFSET ], offset );
-    SETBE32(&cmd[RKFT_SIZE], size);
-	//cmd[RKFT_SIZE] = size;
-#endif
-    libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, (uint8_t*)usbcmd, sizeof(t_blcmd), &tmp, 0);
+	ret = libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, (uint8_t*)usbcmd, sizeof(t_blcmd), &tmp, 0);
     free(usbcmd);
+
+    return ret;
 }
 
 #define send_buf(h,e,s) libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, \
@@ -360,7 +370,7 @@ int soc_flash_read( libusb_device_handle *h, int offset, int size)
 #if PHASE_2
         usb_tranceive( h, RKFCMD_FLASH_READ, offset, RKFT_BLOCKSIZE)
 #else
-        send_cmd(h, 2, 0x00, RKFCMD_FLASH_READ, offset, RKFT_OFF_INCR);
+        send_cmd(h, 2, RKFCMD_FLASH_READ, offset, RKFT_OFF_INCR);
         recv_buf(h, 1, RKFT_BLOCKSIZE);
         recv_res(h, 1);
 #endif
@@ -402,7 +412,7 @@ int soc_flash_write( libusb_device_handle *h, int offset, int size)
             info("EOF reached.\n");
         }
 
-        send_cmd(h, 2, 0x80, RKFCMD_FLASH_WRITE, offset, RKFT_OFF_INCR);
+        send_cmd(h, 2, RKFCMD_FLASH_WRITE, offset, RKFT_OFF_INCR);
         send_buf(h, 2, RKFT_BLOCKSIZE);
         recv_res(h, 1);
         /* Bootloader result is returned in tmp buffer */
@@ -418,6 +428,9 @@ int soc_flash_write( libusb_device_handle *h, int offset, int size)
 /** Erase FLASH memory of SOC
  *
  * This function erases the FLASH via the bootloader.
+ * NAND does not support erasing FLASH and it is not needed to erase a
+ * section before writing normal data.
+ * It is only for erasing certain areas for testing.
  */
 int soc_flash_erase( libusb_device_handle *h, int offset, int size)
 {
@@ -427,7 +440,7 @@ int soc_flash_erase( libusb_device_handle *h, int offset, int size)
 		if (offset % RKFT_DISPLAY == 0)
 			info("erasing flash memory at offset 0x%08x", offset);
 
-		send_cmd(h, 2, 0x80, RKFCMD_FLASH_WRITE, offset, RKFT_OFF_INCR);
+		send_cmd(h, 2, RKFCMD_FLASH_WRITE, offset, RKFT_OFF_INCR);
 		send_buf(h, 2, RKFT_BLOCKSIZE);
 		recv_res(h, 1);
         /* Bootloader result is returned in tmp buffer */
@@ -452,6 +465,10 @@ int soc_flash_erase( libusb_device_handle *h, int offset, int size)
  * The content is saved in a buffer an can be used by other commands
  * to auto-evaluate addresses.
  *
+ * Parameters are located at Address 0x00000000 and are 1024 bytes of the first sector
+ * They start with "PARM" and size of the real content.
+ * On RK2918 the PARM content is written to the first 5 sectors of the NAND.
+ *
  */
 int soc_parameters_get( libusb_device_handle *h, uint8_t *buf, int *size)
 {
@@ -460,7 +477,7 @@ int soc_parameters_get( libusb_device_handle *h, uint8_t *buf, int *size)
 	*size = 0;
 	info("reading parameters from SOC");
 
-	send_cmd(h, 2, 0x00, RKFCMD_FLASH_READ, 0, RKFT_OFF_INCR);
+	send_cmd(h, 2, RKFCMD_FLASH_READ, 0, RKFT_OFF_INCR);
 	recv_buf(h, 1, RKFT_BLOCKSIZE);
 	recv_res(h, 1);
     /* Bootloader result is returned in tmp buffer */
@@ -622,7 +639,7 @@ int soc_dram_read( libusb_device_handle *h, int offset, int size)
         int sizeRead = size > RKFT_MEM_INCR ? RKFT_MEM_INCR : size;
         info("reading memory at offset 0x%08x size %x", offset, sizeRead);
 
-        send_cmd(h, 2, 0x00, 0x000a1700, offset-0x60000000, sizeRead);
+        send_cmd(h, 2, RKFCMD_DRAM_READ, offset-0x60000000, sizeRead);
         recv_buf(h, 1, sizeRead);
         recv_res(h, 1);
         /* Bootloader result is returned in tmp buffer */
@@ -645,6 +662,14 @@ int soc_dram_read( libusb_device_handle *h, int offset, int size)
  *
  *  Support Functions
  */
+uint32_t cidtab[] = {
+		0xCF319000,
+		0xE5597A95,
+		0xDB2CBFD2,
+		0x034D83B5,
+		0x2A255D17,
+		0x011E72FD,
+};
 
 int soc_bootloader( libusb_device_handle *h)
 {
@@ -653,20 +678,32 @@ int soc_bootloader( libusb_device_handle *h)
 	int i, n = 0;
 
 	info("Detecting Hardware...\n");
-
+#if 0 /* only on 2918 */
 	cid = 0xCF319000;
-	send_cmd(h, EP_CMD, 0x80, RKFCMD_BLD_INIT, 0x00000000, 0x00);
+	ret = send_cmd( h, EP_CMD, RKFCMD_BLD_INIT, 0, 0);
+	if (ret)
+		return ret;
+	ret = recv_res(h, EP_DATA);
+	fprintf(stderr, "  0x%08x: Init returned 0x%02x\n", RKFCMD_BLD_INIT, res[sizeof(res)-1]);
+
+	usleep(20*1000);
+#endif
+	cid = 0xE5597A95;
+	ret = send_cmd( h, EP_CMD, RKFCMD_BLD_HELLO, 0, 0);
 	if (ret)
 		return ret;
 	ret = recv_res(h, EP_DATA);
 	if (ret)
 		return ret;
-	fprintf(stderr, "  0x%08x: Init returned 0x%02x\n", RKFCMD_BLD_INIT, res[sizeof(res)-1]);
+	fprintf(stderr, "  0x%08x: Init returned 0x%02x\n", RKFCMD_BLD_HELLO, res[sizeof(res)-1]);
 
+	usleep(20*1000);
+
+#if 0
 	if (res[sizeof(res)-1] == 0) {
 		/* Try secondary info request for newer devices */
 		cid = 0xCF319000;
-		send_cmd(h, EP_CMD, 0x80, RKFCMD_BLD_DATA, 0x00000000, 0x00);
+		send_cmd(h, EP_CMD, RKFCMD_BLD_DATA, 0x00000000, 0x00);
 		recv_buf(h, EP_DATA, 16);
 		recv_res(h, EP_DATA);
 		info("Init returnd 0x%02x\n", res[sizeof(res)-1]);
@@ -679,7 +716,7 @@ int soc_bootloader( libusb_device_handle *h)
 		memset( ver, 0, sizeof(ver));
 		i = 0;
 		do {
-			send_cmd(h, EP_CMD, 0x80, RKFCMD_BLD_HELLO, 0x00000000, 0x00);
+			send_cmd(h, EP_CMD, RKFCMD_BLD_HELLO, 0x00000000, 0x00);
 			recv_res(h, EP_DATA);
 			if (res[sizeof(res)-1] == 1) {
 				n=res[sizeof(res)-3];
@@ -687,6 +724,8 @@ int soc_bootloader( libusb_device_handle *h)
 			}
 			i++;
 		} while ((res[sizeof(res)-1]==1) && (i<16));
+
+		usleep(20*1000);
 
 		/* Print this as debug until we can decode it. */
 		if (n) {
@@ -697,6 +736,8 @@ int soc_bootloader( libusb_device_handle *h)
 			fprintf(stderr, "\n");
 		}
 	}
+#endif
+
     return ret;
 }
 
@@ -705,7 +746,7 @@ int soc_reboot( libusb_device_handle *h)
 	int ret = 0;
 
 	info("rebooting device...\n");
-	send_cmd(h, 2, 0x00, RKFCMD_REBOOT, 0x00000000, 0x00);
+	send_cmd(h, 2, RKFCMD_REBOOT, 0, 0);
 	recv_res(h, 1);
 
 	//TODO: evaluate tmp[0] response
@@ -851,7 +892,7 @@ int main(int argc, char **argv) {
             int sizeRead = size > RKFT_IDB_INCR ? RKFT_IDB_INCR : size;
             info("reading IDB flash memory at offset 0x%08x\n", offset);
              
-            send_cmd(h, 2, 0x80, 0x000a0400, offset, sizeRead);
+            send_cmd(h, 2, RKFCMD_IDB_READ, offset, sizeRead);
             recv_buf(h, 1, RKFT_IDB_BLOCKSIZE * sizeRead);
             recv_res(h, 1);
              

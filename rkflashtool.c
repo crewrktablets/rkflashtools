@@ -121,7 +121,7 @@ typedef enum {
 	RKFCMD_BLD_DATA		= 0x00061b00 | CFLAG_RD,	/* ?? Get Bootloader or Flash information */
 													/* returns string B01321020311001V */
 
-	RKFCMD_REBOOT		= 0x0006ff00 | CFLAG_RD,	/* Reboot */
+	RKFCMD_REBOOT		= 0x0006ff00 | CFLAG_WR,	/* Reboot */
 
 	RKFCMD_FLASH_READ	= 0x000a1400 | CFLAG_RD,	/* Read from FLASH, USBS is 0x00 */
 	RKFCMD_FLASH_WRITE	= 0x000a1500 | CFLAG_WR,	/* Write to FLASH, USBS is 0x00 */
@@ -169,16 +169,17 @@ typedef enum {
 .--. .---------.             .. .---------. .---------.       .---------.
 0  3|4         8|           |12|13       16|17       20|     |23       26|
 USBC CF 31 90 00 00 00 00 00 80 00 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+USBC:e5:59:7a:99:00:00:00:00:80:00:0a:14:00:00:00:00:00:00:00:00:00:00:20:00:00:00:00
 */
 typedef struct __attribute__((__packed__)) {
 	uint32_t	token;		/**< Token is USBC 0x55534243 */
 	uint32_t	cmdid;		/**< Command ID (sort of random number) */
 	uint32_t	dummy1;		/**< Not used so far */
-	uint8_t 	Flag;		/**< Sometimes set to 0x80, sometimes not */
+	uint8_t 	Flag;		/**< Set 0x80 on any read command */
 	eBldCmd		cmd;		/**< The command */
 	uint32_t	addr;		/**< address of data belonging to this command */
-	uint32_t	size;		/**< size of data belonging to this command */
 	uint16_t 	dummy2;		/**< Not used so far */
+	uint32_t	size;		/**< size of data belonging to this command */
 	uint32_t	dummy3;		/**< Not used so far */
 } t_blcmd;
 
@@ -247,7 +248,8 @@ static int send_cmd(libusb_device_handle *h, int e, uint32_t command, uint32_t o
 	usbcmd->Flag = (uint8_t)(command >> 24);
 	SETBE32(usbcmd->cmd, (command & 0x00ffffff));
 	SETBE32(usbcmd->addr, offset);
-	SETBE32(usbcmd->size, size);
+	//SETBE32(usbcmd->size, size);
+	usbcmd->size = size;
 
 	ret = libusb_bulk_transfer(h, e|LIBUSB_ENDPOINT_OUT, (uint8_t*)usbcmd, sizeof(t_blcmd), &tmp, 0);
     free(usbcmd);
@@ -473,12 +475,13 @@ int soc_flash_erase( libusb_device_handle *h, int offset, int size)
 int soc_parameters_get( libusb_device_handle *h, uint8_t *buf, int *size)
 {
 	uint32_t *p = (uint32_t*)buf;
+	int i;
 
 	*size = 0;
 	info("reading parameters from SOC");
 
-	send_cmd(h, 2, RKFCMD_FLASH_READ, 0, RKFT_OFF_INCR);
-	recv_buf(h, 1, RKFT_BLOCKSIZE);
+	send_cmd(h, 2, RKFCMD_FLASH_READ, 0, 1024/512);
+	recv_buf(h, 1, 1024);
 	recv_res(h, 1);
     /* Bootloader result is returned in tmp buffer */
     info ( " = 0x%x\n", tmp);

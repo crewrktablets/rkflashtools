@@ -43,6 +43,7 @@
 #define VID_RK              0x2207
 #define PID_RK2818          0x281a
 #define PID_RK2918          0x290a
+#define PID_RK3026          0x292c
 #define PID_RK3066          0x300a
 #define PID_RK3168          0x300b
 #define PID_RK3188          0x310b
@@ -78,6 +79,7 @@ typedef struct {
 const t_pid pidtab[] = {
     { PID_RK2818, "RK2818" },
     { PID_RK2918, "RK2918" },
+    { PID_RK3026, "RK3026" },
     { PID_RK3066, "RK3066" },
     { PID_RK3168, "RK3168" },
     { PID_RK3188, "RK3188" },
